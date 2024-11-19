@@ -112,7 +112,7 @@ class EEGVisualizer:
 
 if __name__ == "__main__":
     try:
-        visualizer = EEGVisualizer(port='/dev/cu.usbmodem101')  # Change 'COM3' to the correct port for your system
+        visualizer = EEGVisualizer(port='/dev/cu.usbserial-10')  # Change 'COM3' to the correct port for your system
         visualizer.run()
     except Exception as e:
         print(f"Error: {e}")
