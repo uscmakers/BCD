@@ -6,14 +6,13 @@ import sounddevice as sd
 import scipy.signal as signal
 
 class EEGVisualizer:
-    def __init__(self, port='/dev/cu.usbmodem101', baudrate=115200, timeout=0.1):
+    def __init__(self, port='/dev/cu.usbmodem101', baudrate=115200):
         self.port = port
         self.baudrate = baudrate
-        self.timeout = timeout
 
         # Initialize serial connection
         try:
-            self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=self.timeout)
+            self.serial_conn = serial.Serial(self.port, self.baudrate)
         except serial.SerialException as e:
             raise Exception(f"Could not open serial port {self.port}: {e}")
         
@@ -55,13 +54,13 @@ class EEGVisualizer:
                 spine.set_color('#444444')
         
         # Raw signal plot with adjusted limits
-        self.ax_raw.set_ylim(-250, 250)
+        self.ax_raw.set_ylim(0,2000)
         self.ax_raw.set_xlim(0, self.TIME_LENGTH / self.SAMPLE_RATE)
         self.ax_raw.set_title('Raw EEG Signal', color='white', pad=20)
         self.line_raw, = self.ax_raw.plot([], [], color='#00FF00', linewidth=1, label='Raw')
         
         # Filtered signals plot with adjusted limits
-        self.ax_bands.set_ylim(-250, 250)
+        self.ax_bands.set_ylim(-50, 50)
         self.ax_bands.set_xlim(0, self.TIME_LENGTH / self.SAMPLE_RATE)
         self.ax_bands.set_title('Filtered Brain Waves', color='white', pad=20)
         
