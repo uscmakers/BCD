@@ -11,9 +11,10 @@ class WaveSynth:
         self.server.start()
         
         # Sound parameters
-        self.base_note = 440
-        self.amplitude = 0.5
-        self.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
+        self.base_note = 293.66  # D4 note
+        self.amplitude = 0.3     # Reduced amplitude
+        # D major scale intervals: D, E, F#, G, A, B, C#
+        self.scale_intervals = [0, 2, 4, 5, 7, 9, 11]  
         self.num_notes = 8
         
         # Control flags
@@ -32,31 +33,31 @@ class WaveSynth:
             semitones = scale_degree + (12 * octave)
             self.melody_notes.append(semitones)
 
-        # Create the melody oscillator
-        self.melody = Sine(freq=self.base_note, mul=self.amplitude * 0.4).out()
-        self.modulator = Sine(freq=1, mul=20, add=0)
+        # Create the melody oscillator with smoother sine wave
+        self.melody = SuperSaw(freq=self.base_note, mul=self.amplitude * 0.4).out()
+        self.modulator = Sine(freq=1, mul=10, add=0)  # Reduced modulation depth
 
-        # Setup drums
+        # Setup drums with adjusted parameters
         # Hi-hat
-        self.hihat = Noise(mul=0.15)
-        self.hihat_filter = ButHP(self.hihat, freq=9000)
-        self.hihat_env = Adsr(attack=0.001, decay=0.03, sustain=0, release=0.01)
+        self.hihat = Noise(mul=0.08)  # Reduced volume
+        self.hihat_filter = ButHP(self.hihat, freq=10000)  # Higher cutoff
+        self.hihat_env = Adsr(attack=0.001, decay=0.02, sustain=0, release=0.01)
         self.hihat_out = self.hihat_filter * self.hihat_env
         
         # Kick
-        self.kick = Sine(freq=50, mul=0.5)
-        self.kick_env = Adsr(attack=0.001, decay=0.15, sustain=0, release=0.01)
-        self.kick_pitch_env = Adsr(attack=0.001, decay=0.05, sustain=0, release=0.01)
-        self.kick_pitch = Port(self.kick_pitch_env, risetime=0.001, falltime=0.001, mul=100, add=50)
+        self.kick = Sine(freq=45, mul=0.4)  # Lower frequency, reduced volume
+        self.kick_env = Adsr(attack=0.001, decay=0.1, sustain=0, release=0.01)
+        self.kick_pitch_env = Adsr(attack=0.001, decay=0.03, sustain=0, release=0.01)
+        self.kick_pitch = Port(self.kick_pitch_env, risetime=0.001, falltime=0.001, mul=80, add=45)
         self.kick.freq = self.kick_pitch
         self.kick_out = self.kick * self.kick_env
         
         # Initialize metro for timing
-        self.metro = Metro(time=0.5).play()
+        self.metro = Metro(time=0.4).play()  # Slightly faster default tempo
         
-        # Setup patterns
-        self.hihat_pat = Beat(time=self.metro, taps=8, w1=[60,90,60,90,60,90,60,90])
-        self.kick_pat = Beat(time=self.metro, taps=8, w1=[100,0,60,0,90,0,60,30])
+        # Setup patterns with more musical rhythm
+        self.hihat_pat = Beat(time=self.metro, taps=16, w1=[90,30,60,30,90,30,60,30,90,30,60,30,90,30,60,30])
+        self.kick_pat = Beat(time=self.metro, taps=8, w1=[100,0,40,0,80,0,40,20])
         
         # Trigger drum envelopes
         self.hihat_trig = TrigFunc(self.hihat_pat, self.hihat_env.play)
@@ -80,17 +81,21 @@ class WaveSynth:
         if not self.is_playing.is_set():
             return
 
-        # Update modulator frequency
-        self.modulator.freq = new_freq
+        # Convert numpy.float64 to Python float
+        new_freq = float(new_freq)
         
-        # Calculate new tempo (logarithmic scaling)
-        log_freq = np.log10(max(new_freq, 0.1))  # Prevent log(0)
-        log_min = np.log10(0.1)   # Minimum expected frequency
-        log_max = np.log10(100.0) # Maximum expected frequency
+        # Update modulator frequency with smoother scaling
+        scaled_freq = float(np.clip(new_freq * 0.5, 0.1, 20.0))  # Convert to float
+        self.modulator.freq = scaled_freq
         
-        # Scale to reasonable tempo range
-        tempo = 1.0 - (log_freq - log_min) / (log_max - log_min)
-        metro_time = float(tempo * 0.9 + 0.1)  # Scale to range 0.1 to 1.0 seconds
+        # Calculate new tempo with adjusted scaling
+        log_freq = float(np.log10(max(new_freq, 0.1)))  # Convert to float
+        log_min = float(np.log10(0.1))
+        log_max = float(np.log10(100.0))
+        
+        # Scale to reasonable tempo range (0.2 to 0.8 seconds)
+        tempo = float(1.0 - (log_freq - log_min) / (log_max - log_min))
+        metro_time = float(tempo * 0.6 + 0.2)
         
         # Update metro time
         self.metro.time = metro_time
