@@ -3,13 +3,13 @@ import torch.nn as nn
 
 # --- Model Configuration ---
 # These should match the parameters used during training
-FEATURE_COLUMNS = ['Delta', 'Theta', 'LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
+FEATURE_COLUMNS = ['LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
 INPUT_SIZE = len(FEATURE_COLUMNS) # Number of features
 HIDDEN_SIZE = 32          # Number of features in the hidden state
 NUM_LAYERS = 1           # Number of stacked LSTM layers
 SEQUENCE_LENGTH = 4       # The sequence length the model expects
 # Define the classes exactly as used in training (and in the same order for the LabelEncoder)
-KNOWN_CLASSES = ['Forward', 'Backward']
+KNOWN_CLASSES = ['Forward', 'Backward', 'Left', 'Right', 'Up', 'Down', 'None']
 NUM_CLASSES = len(KNOWN_CLASSES)
 # --- End Configuration ---
 
@@ -32,13 +32,14 @@ class EEGLSTMClassifier(nn.Module):
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
 
         # Forward propagate LSTM
-        # out shape: (batch_size, seq_length, hidden_size)
+        # lstm_out shape: (batch_size, seq_length, hidden_size)
         # _ contains the final hidden and cell states
-        out, _ = self.lstm(x, (h0, c0))
+        lstm_out, _ = self.lstm(x, (h0, c0))
 
         # Decode the hidden state of the last time step
-        # out[:, -1, :] selects the output of the last time step for all batches
-        # shape becomes (batch_size, hidden_size)
-        out = out[:, -1, :]
-        out = self.fc(out) # shape: (batch_size, num_classes)
-        return out 
+        # last_step_out shape: (batch_size, hidden_size)
+        last_step_out = lstm_out[:, -1, :]
+        fc_out = self.fc(last_step_out) # shape: (batch_size, num_classes)
+
+        # Return both the final classification output AND the full sequence of LSTM hidden states
+        return fc_out, lstm_out 

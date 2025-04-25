@@ -10,18 +10,20 @@ import os
 from sklearn.metrics import f1_score
 
 # --- Configuration ---
-CSV_FILE_PATH = 'eeg_samples/david-binary_lh.csv'
-FEATURE_COLUMNS = ['Delta', 'Theta', 'LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
+CSV_FILE_PATH = 'eeg_samples/pela-binary-4_23.csv'
+FEATURE_COLUMNS = ['alphaL','alphaH','betaL','betaH','gammaL','gammaM']
 LABEL_COLUMN = 'Label'
+# Define all possible labels your logger script produces
+POSSIBLE_LABELS = ['Forward', 'Backward', 'Left', 'Right', 'Up', 'Down', 'None']
 SEQUENCE_LENGTH = 4 # Number of time steps to look back
 TEST_SIZE = 0.2 # 20% of data for testing
 RANDOM_STATE = 42 # For reproducible splits
-BATCH_SIZE = 32 # Adjusted batch size, can be tuned
-EPOCHS = 50
+BATCH_SIZE = 32
+EPOCHS = 100
 LEARNING_RATE = 0.001
-HIDDEN_SIZE = 32 # Number of features in the hidden state of the LSTM
-NUM_LAYERS = 1 # Number of LSTM layers stacked
-MODEL_SAVE_PATH = 'eeg_lstm_model.pth' # Path to save the trained model
+HIDDEN_SIZE = 32
+NUM_LAYERS = 1
+MODEL_SAVE_PATH = 'pela6DOF_lstm_model.pth' # New model name
 
 # --- Set Device ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -41,15 +43,20 @@ except Exception as e:
 
 # --- 2. Preprocess Data ---
 print("\nPreprocessing data...")
+# Drop rows where the label itself is missing (NaN)
 df_cleaned = df.dropna(subset=[LABEL_COLUMN])
+# Ensure labels are strings
 df_cleaned[LABEL_COLUMN] = df_cleaned[LABEL_COLUMN].astype(str)
-df_filtered = df_cleaned[df_cleaned[LABEL_COLUMN].isin(['Forward', 'Backward'])].copy()
+
+# Filter to keep only the labels defined in POSSIBLE_LABELS
+df_filtered = df_cleaned[df_cleaned[LABEL_COLUMN].isin(POSSIBLE_LABELS)].copy()
 
 if df_filtered.empty or len(df_filtered) < SEQUENCE_LENGTH:
-    print(f"Error: Not enough valid data (found {len(df_filtered)}, need at least {SEQUENCE_LENGTH}) after cleaning.")
+    print(f"Error: Not enough valid data (found {len(df_filtered)}, need at least {SEQUENCE_LENGTH}) after filtering for {POSSIBLE_LABELS}.")
     exit()
 
 print(f"Data shape after filtering labels: {df_filtered.shape}")
+print(f"Label distribution:\n{df_filtered[LABEL_COLUMN].value_counts()}") # Show counts per label
 
 # Select Features (X) and Target (y)
 X_raw = df_filtered[FEATURE_COLUMNS].values
@@ -57,9 +64,13 @@ y_labels = df_filtered[LABEL_COLUMN].values
 
 # Encode Labels
 label_encoder = LabelEncoder()
-y_encoded = label_encoder.fit_transform(y_labels)
+# Fit the encoder on all possible labels to ensure consistent encoding
+label_encoder.fit(POSSIBLE_LABELS)
+y_encoded = label_encoder.transform(y_labels) # Transform the actual labels found in the data
 num_classes = len(label_encoder.classes_)
-print(f"\nLabels mapped: {list(label_encoder.classes_)} -> {list(range(num_classes))}")
+print(f"\nLabels mapped ({num_classes} classes):")
+for i, cls in enumerate(label_encoder.classes_):
+    print(f"  '{cls}' -> {i}")
 
 # Scale Features
 scaler = StandardScaler()
@@ -162,6 +173,7 @@ model = EEGLSTMClassifier(input_size=input_dim,
                           num_layers=NUM_LAYERS,
                           num_classes=num_classes).to(device)
 print(model)
+print(f"Model configured for {num_classes} output classes.")
 
 # --- 7. Define Loss Function and Optimizer ---
 criterion = nn.CrossEntropyLoss()
