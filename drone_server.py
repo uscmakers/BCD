@@ -29,7 +29,7 @@ from scipy.ndimage import gaussian_filter # <-- Import for smoothing
 # Import model definition and constants from models.py
 # Ensure models.py is in the same directory or Python path
 try:
-    from models import (EEGLSTMClassifier, SEQUENCE_LENGTH, FEATURE_COLUMNS,
+    from EEG_server.models import (EEGLSTMClassifier, SEQUENCE_LENGTH, FEATURE_COLUMNS,
                         KNOWN_CLASSES, INPUT_SIZE, HIDDEN_SIZE, NUM_LAYERS,
                         NUM_CLASSES)
 except ImportError:
@@ -37,13 +37,26 @@ except ImportError:
     print("Ensure models.py exists and contains the necessary definitions.", file=sys.stderr)
     sys.exit(1)
 
+# --- Tello Drone Import ---
+try:
+    from djitellopy import Tello
+except ImportError:
+    print("Error: Could not import djitellopy.", file=sys.stderr)
+    print("Please install it: pip install djitellopy", file=sys.stderr)
+    sys.exit(1)
+# --- End Tello Drone Import ---
+
 # --- Configuration ---
-MODEL_LOAD_PATH = 'eeg_lstm.pth' # Make sure this matches the trained model
+MODEL_LOAD_PATH = 'EEG_server/eeg_lstm.pth' # Make sure this matches the trained model
 SERIAL_BAUD_RATE = 115200              # Baud rate for serial communication
 SERIAL_TIMEOUT = 2                     # Timeout for serial read in seconds
 PLOT_HISTORY_LENGTH = 100              # How many data points to show on the plot
 PLOT_LINE_WIDTH = 1.5                  # Thicker lines for plot
-# --- End Configuration ---
+
+# --- Drone Configuration ---
+MOVE_DISTANCE = 30                     # Distance in cm for each move command (min 20)
+MAX_ACCUMULATED_MOVEMENT = 90          # Max distance in cm per direction since takeoff
+# --- End Drone Configuration ---
 
 # --- Global Variables ---
 model = None
@@ -55,7 +68,14 @@ latest_hidden_states = None # Store the latest hidden state sequence
 latest_attention = 0      # Store latest attention value (0-100)
 latest_meditation = 0     # Store latest meditation value (0-100)
 latest_signal = 0         # Store latest signal quality (0-200, 0=good)
-# --- End Global Variables ---
+
+# --- Drone Globals ---
+tello = None
+last_drone_command = None # Stores the string name of the last executed command (e.g., 'Forward')
+accumulated_movement = { # Tracks movement since takeoff
+    'forward': 0, 'back': 0, 'left': 0, 'right': 0, 'up': 0, 'down': 0
+}
+# --- End Drone Globals ---
 
 # --- Plotting Globals ---
 plot_data = {feature: deque(maxlen=PLOT_HISTORY_LENGTH) for feature in FEATURE_COLUMNS}
@@ -95,6 +115,22 @@ CSV_TO_FEATURE_MAP = {
     "gammaM": "HighGamma" # Check if gammaM is the correct mapping for HighGamma
 }
 # --- End Data Format Mapping ---
+
+# --- Prediction to Drone Command Mapping ---
+# Maps prediction strings (from KNOWN_CLASSES) to Tello methods and direction keys
+# Assumes KNOWN_CLASSES contains these strings. Add 'Rest' or similar if needed.
+PREDICTION_TO_COMMAND = {
+    # Prediction String : (tello_method_name, direction_key, requires_flying)
+    "Forward":   ("move_forward", 'forward', True),
+    "Backward":  ("move_back",    'back',    True),
+    "Left":      ("move_left",    'left',    True),
+    "Right":     ("move_right",   'right',   True),
+    "Up":        ("move_up",      'up',      True),
+    "Down":      ("move_down",    'down',    True),
+    # Add other classes like "Rest" if your model predicts them
+    # "Rest":      (None,           None,      False),
+}
+# --- End Prediction to Drone Command Mapping ---
 
 def load_resources():
     """Loads the trained model weights."""
@@ -192,12 +228,14 @@ def parse_eeg_line(line: str):
 
 def process_eeg_sample(all_parsed_data):
     """
-    Processes a single parsed EEG sample dictionary (containing model features and other metrics).
+    Processes a single parsed EEG sample dictionary.
     Extracts model features, adds to buffer, runs inference if buffer is full.
     Updates global attention/meditation/signal values.
+    Triggers drone movement based on prediction if constraints are met.
     """
     global eeg_buffer, model, latest_prediction, latest_hidden_states, \
-           latest_attention, latest_meditation, latest_signal # Add new globals
+           latest_attention, latest_meditation, latest_signal, \
+           tello, last_drone_command, accumulated_movement # Add drone globals
 
     if model is None:
         print("Error: Model not loaded. Call load_resources() first.")
@@ -249,17 +287,56 @@ def process_eeg_sample(all_parsed_data):
             fc_out, lstm_hidden_states = model(sequence_tensor_3d)
             _, predicted_idx = torch.max(fc_out.data, 1)
             predicted_label_idx = predicted_idx.item()
-            prediction = label_encoder_map.get(predicted_label_idx, "Unknown")
-            latest_prediction = prediction
+            prediction = label_encoder_map.get(predicted_label_idx, "Unknown") # Get the string prediction
+            latest_prediction = prediction # Update global for display
             latest_hidden_states = lstm_hidden_states.squeeze(0).cpu().numpy()
 
         end_time = time.perf_counter()
         inference_time_ms = (end_time - start_time) * 1000
 
-        print(f"\nPrediction: '{prediction}' (Att: {latest_attention}, Med: {latest_meditation}, Sig: {latest_signal}) (Inf: {inference_time_ms:.2f} ms)") # Added metrics to print
+        print(f"\nPrediction: '{prediction}' (Att: {latest_attention}, Med: {latest_meditation}, Sig: {latest_signal}) (Inf: {inference_time_ms:.2f} ms)")
+
+        # --- Drone Movement Logic ---
+        if tello and prediction in PREDICTION_TO_COMMAND:
+            command_info = PREDICTION_TO_COMMAND[prediction]
+            tello_method_name, direction_key, requires_flying = command_info
+
+            if tello_method_name: # Check if it's a movement command (not 'Rest')
+                # Constraint 1: Drone must be flying
+                if not tello.is_flying:
+                    print(f"Drone command '{prediction}' ignored: Drone not flying.")
+                # Constraint 2: Command must be different from the last executed command
+                elif prediction == last_drone_command:
+                    print(f"Drone command '{prediction}' ignored: Same as last command.")
+                # Constraint 3: Accumulated movement check
+                elif accumulated_movement[direction_key] + MOVE_DISTANCE > MAX_ACCUMULATED_MOVEMENT:
+                    print(f"Drone command '{prediction}' ignored: Max accumulated distance ({MAX_ACCUMULATED_MOVEMENT}cm) reached for direction '{direction_key}'.")
+                else:
+                    # All constraints passed, execute the move
+                    try:
+                        print(f"Executing drone command: {prediction} ({MOVE_DISTANCE}cm)")
+                        # Get the actual method from the tello object
+                        move_function = getattr(tello, tello_method_name)
+                        move_function(MOVE_DISTANCE) # Execute the function (e.g., tello.move_forward(20))
+
+                        # Update state *after* successful execution
+                        last_drone_command = prediction
+                        accumulated_movement[direction_key] += MOVE_DISTANCE
+                        print(f"Accumulated movement: {accumulated_movement}")
+
+                    except Exception as e:
+                        print(f"Error executing drone command '{prediction}': {e}", file=sys.stderr)
+                        # Consider landing or emergency stop here depending on error type
+            else:
+                # Handle non-movement predictions like "Rest" if needed
+                print(f"Prediction is '{prediction}', no drone movement.")
+                # Reset last command if prediction is 'Rest' to allow immediate movement next time
+                if prediction == "Rest": # Assuming 'Rest' is a possible class
+                     last_drone_command = None
+
 
     else:
-        print(f"\rBuffer: {len(eeg_buffer)}/{SEQUENCE_LENGTH} (Att: {latest_attention}, Med: {latest_meditation}, Sig: {latest_signal})", end='', flush=True) # Added metrics to print
+        print(f"\rBuffer: {len(eeg_buffer)}/{SEQUENCE_LENGTH} (Att: {latest_attention}, Med: {latest_meditation}, Sig: {latest_signal})", end='', flush=True)
         # latest_prediction remains unchanged
         # latest_hidden_states = None # Optional
 
@@ -267,7 +344,7 @@ def process_eeg_sample(all_parsed_data):
 
 
 def init_plot():
-    """Initializes the matplotlib plot with 3 subplots: Indicators (left), Features (middle), 3D Hidden States (right)."""
+    """Initializes the matplotlib plot and connects the key press handler."""
     global plot_fig, plot_ax_indicators, plot_ax_features, plot_ax_hidden, plot_lines, \
            plot_text_prediction, plot_text_buffer, plot_surf_hidden, \
            plot_bar_attention, plot_bar_meditation, plot_bar_signal, \
@@ -438,16 +515,19 @@ def init_plot():
     # --- Final Layout Adjustment ---
     gs.tight_layout(plot_fig, rect=[0, 0.03, 1, 0.95])
 
+    # --- Connect Key Press Handler ---
+    plot_fig.canvas.mpl_connect('key_press_event', handle_key_press)
+    print("Plot initialized. Key controls: T=Takeoff, L=Land, E=Emergency")
+    # --- End Connect Key Press Handler ---
+
     plot_fig.canvas.draw()
     plt.show(block=False)
-    print("Plot initialized with enhanced aesthetics.")
+    # print("Plot initialized with enhanced aesthetics.") # Removed redundant print
 
 
 def update_plot(all_parsed_data):
     """
-    Updates the plot with new indicator colors, feature data (sliding window),
-    and smoothed 3D hidden state surface.
-    Accepts the full dictionary returned by parse_eeg_line.
+    Updates the plot with new indicator colors, feature data, and hidden state.
     """
     global plot_sample_count, latest_prediction, latest_hidden_states, plot_surf_hidden, \
            latest_attention, latest_meditation, latest_signal, \
@@ -556,16 +636,87 @@ def update_plot(all_parsed_data):
         print(f"Error updating plot: {e}", file=sys.stderr)
 
 
+# --- Keyboard Handler for Drone Control ---
+def handle_key_press(event):
+    """Handles key presses for manual drone control."""
+    global tello, accumulated_movement, last_drone_command
+    print(f"\nKey pressed: {event.key}") # Debug print
+
+    if tello is None:
+        print("Tello object not initialized.")
+        return
+
+    key = event.key.lower() # Use lower case for easier comparison
+
+    if key == 't': # Takeoff
+        if not tello.is_flying:
+            print("Attempting takeoff...")
+            try:
+                tello.takeoff()
+                print("Takeoff successful.")
+                # Reset accumulated movement and last command on takeoff
+                accumulated_movement = {k: 0 for k in accumulated_movement}
+                last_drone_command = None
+                print("Accumulated movement reset.")
+            except Exception as e:
+                print(f"Takeoff failed: {e}", file=sys.stderr)
+        else:
+            print("Drone is already flying.")
+    elif key == 'l': # Land
+        if tello.is_flying:
+            print("Attempting landing...")
+            try:
+                tello.land()
+                print("Landing successful.")
+                last_drone_command = None # Reset last command
+            except Exception as e:
+                print(f"Landing failed: {e}", file=sys.stderr)
+        else:
+            print("Drone is already landed.")
+    elif key == 'e': # Emergency
+        print("EMERGENCY STOP TRIGGERED!")
+        try:
+            tello.emergency()
+            print("Emergency command sent.")
+            # Optionally, you might want to exit the script here or disable further commands
+        except Exception as e:
+            print(f"Emergency command failed: {e}", file=sys.stderr)
+    # Add other manual keys if needed (e.g., battery check 'b')
+    # elif key == 'b':
+    #     try:
+    #         battery = tello.get_battery()
+    #         print(f"Drone battery: {battery}%")
+    #     except Exception as e:
+    #         print(f"Failed to get battery: {e}", file=sys.stderr)
+
+# --- End Keyboard Handler ---
+
+
 # --- Main Execution ---
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         sys.exit(f"Usage: {sys.argv[0]} <serial-device>")
     serial_port_arg = sys.argv[1]
 
-    print("--- EEG Inference Server ---")
+    print("--- EEG Inference Server with Tello Control ---")
     print(f"Using device: {device}")
     load_resources()
-    init_plot()
+    init_plot() # Plot needs to be initialized before Tello connection for key handler
+
+    # --- Initialize and Connect Tello ---
+    print("\nInitializing Tello drone...")
+    tello = Tello()
+    try:
+        tello.connect(False)
+        print("Tello connected successfully.")
+        # Ensure motors are off initially, good practice
+        tello.send_rc_control(0, 0, 0, 0)
+    except Exception as e:
+        print(f"Error connecting to Tello: {e}", file=sys.stderr)
+        print("Proceeding without drone control.")
+        tello = None # Set tello to None if connection failed
+    # --- End Tello Initialization ---
+
 
     print(f"\nAttempting to connect to serial port: {serial_port_arg} at {SERIAL_BAUD_RATE} baud")
     ser = None
@@ -581,6 +732,12 @@ if __name__ == "__main__":
     # Main loop
     while True:
         try:
+            # --- Check for plot closure ---
+            if plot_fig and not plt.fignum_exists(plot_fig.number):
+                 print("\nPlot window closed. Exiting...")
+                 break
+            # --- End Check ---
+
             line_bytes = ser.readline()
             if not line_bytes:
                 continue
@@ -593,10 +750,14 @@ if __name__ == "__main__":
             all_parsed_data = parse_eeg_line(line_str)
 
             if all_parsed_data:
-                # Process sample (updates buffer, prediction, hidden states, AND global indicators)
+                # Process sample (updates buffer, prediction, hidden states, indicators
+                # AND potentially triggers drone movement based on prediction)
                 process_eeg_sample(all_parsed_data)
-                # Update plot with the newly parsed data (features and indicators) and latest states
+                # Update plot with the newly parsed data and latest states
                 update_plot(all_parsed_data) # Pass the full dict here
+
+            # Add a small delay to allow plot updates and prevent busy-waiting
+            # time.sleep(0.01) # Optional: Adjust as needed
 
         except (KeyboardInterrupt, EOFError):
             print("\nExiting...")
@@ -609,10 +770,34 @@ if __name__ == "__main__":
             time.sleep(0.1)
 
     # Cleanup
+    print("\n--- Cleaning up ---")
     if ser and ser.is_open:
         ser.close()
         print("Serial port closed.")
-    if plot_fig:
-        plt.close(plot_fig) # Close the plot window
+
+    # --- Tello Cleanup ---
+    if tello:
+        print("Drone cleanup...")
+        if tello.is_flying:
+            print("Attempting to land drone before exit...")
+            try:
+                tello.land()
+                time.sleep(3) # Give it time to land
+            except Exception as land_err:
+                print(f"Landing attempt failed: {land_err}", file=sys.stderr)
+                print("Attempting emergency stop as fallback...")
+                try:
+                    tello.emergency()
+                except Exception as emerg_err:
+                    print(f"Emergency stop failed: {emerg_err}", file=sys.stderr)
+        try:
+            tello.end()
+            print("Tello connection closed.")
+        except Exception as e:
+            print(f"Error closing Tello connection: {e}", file=sys.stderr)
+    # --- End Tello Cleanup ---
+
+    if plot_fig and plt.fignum_exists(plot_fig.number):
+        plt.close(plot_fig) # Close the plot window if it's still open
         print("Plot closed.")
     print("Server stopped.")

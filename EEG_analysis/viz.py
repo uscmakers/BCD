@@ -4,9 +4,9 @@ import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches # For legend patches
 
 # --- Configuration ---
-file_path = 'eeg_samples/pela-binary-4_23.csv'
+file_path = 'eeg_samples/raksheta-binary.csv'
 # Select the columns you want to plot
-signal_columns = ["signal", "attention", "meditation"] # "delta","theta","alphaL","alphaH","betaL","betaH","gammaL","gammaM"]
+signal_columns = ["signal", "attention", "meditation","alphaL","alphaH","betaL","betaH","gammaL","gammaM"]
 # Optional: Include other signals if desired
 # signal_columns = ['Signal', 'Attention', 'Meditation', 'Delta', 'Theta', 'LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
 label_column = 'Label'

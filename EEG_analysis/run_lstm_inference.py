@@ -6,14 +6,16 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader # Although not strictly needed for inference loop, kept for consistency if needed later
 import os
 import time
+import joblib # <-- Import joblib
 
 # --- Configuration (MUST MATCH TRAINING SCRIPT) ---
-INFERENCE_CSV_PATH = 'eeg_samples/david-binary_lh.csv' # Path to the new CSV for inference
-MODEL_LOAD_PATH = 'eeg_lstm_model.pth' # Path to the saved trained model
-FEATURE_COLUMNS = ['Delta', 'Theta', 'LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
+INFERENCE_CSV_PATH = 'eeg_samples/david-binary-test.csv' # Path to the new CSV for inference
+MODEL_LOAD_PATH = 'eeg_lstm_model_consistent_label_reg.pth' # Path to the saved trained model
+SCALER_LOAD_PATH = 'eeg_scaler_consistent_label_reg.joblib' # <-- Path to the saved scaler file
+FEATURE_COLUMNS = ['alphaL','alphaH','betaL','betaH','gammaL','gammaM']
 LABEL_COLUMN = 'Label' # Column containing ground truth labels (optional, used for comparison)
 SEQUENCE_LENGTH = 4
-HIDDEN_SIZE = 32
+HIDDEN_SIZE = 64
 NUM_LAYERS = 1
 # --- End Configuration ---
 
@@ -50,6 +52,11 @@ if __name__ == "__main__":
     print(f"Loading model from {MODEL_LOAD_PATH}...")
     if not os.path.exists(MODEL_LOAD_PATH):
         print(f"Error: Model file not found at {MODEL_LOAD_PATH}")
+        exit()
+
+    print(f"Loading scaler from {SCALER_LOAD_PATH}...") # <-- Added print for scaler
+    if not os.path.exists(SCALER_LOAD_PATH):
+        print(f"Error: Scaler file not found at {SCALER_LOAD_PATH}")
         exit()
 
     print(f"Loading inference data from {INFERENCE_CSV_PATH}...")
@@ -91,18 +98,25 @@ if __name__ == "__main__":
     # Initialize Label Encoder (Assuming same classes as training)
     # !! IMPORTANT: For robust deployment, load the fitted LabelEncoder from training !!
     label_encoder = LabelEncoder()
-    known_classes = ['Forward', 'Backward'] # Must match training
+    known_classes = ['Forward', 'Backward', 'Left', 'Right', 'Up', 'Down', 'None'] # Must match training
     label_encoder.fit(known_classes) # Fit with known classes
     num_classes = len(label_encoder.classes_)
     print(f"Labels assumed: {list(label_encoder.classes_)} -> {list(range(num_classes))}")
 
 
-    # Initialize and Fit Scaler
-    # !! WARNING: Ideally, load the scaler fitted on the TRAINING data !!
-    # !! Re-fitting on inference data can lead to inaccurate results !!
-    scaler = StandardScaler()
-    X_inference_scaled = scaler.fit_transform(X_inference_raw)
-    print("Features scaled (using statistics from inference data - see warning).")
+    # Load the pre-fitted Scaler
+    try:
+        scaler = joblib.load(SCALER_LOAD_PATH)
+        print("Scaler loaded successfully.")
+        # Apply the loaded scaler
+        X_inference_scaled = scaler.transform(X_inference_raw)
+        print("Features scaled using the loaded scaler.")
+    except FileNotFoundError:
+        print(f"Error: Scaler file not found at {SCALER_LOAD_PATH}")
+        exit()
+    except Exception as e:
+        print(f"Error loading or applying scaler: {e}")
+        exit()
 
     # Create Sequences
     print(f"\nCreating sequences of length {SEQUENCE_LENGTH}...")
@@ -173,4 +187,26 @@ if __name__ == "__main__":
     else:
         print("\nNo sequences were processed for inference.")
 
-    print("\nInference finished.") 
+    print("\nInference finished.")
+
+    # --- Calculate and Print Accuracy (if ground truth labels exist) ---
+    if has_labels and predictions and ground_truth_labels:
+        correct_count = 0
+        valid_comparison_count = 0
+        for pred, gt in zip(predictions, ground_truth_labels):
+            if gt != "Mixed/None": # Only compare if ground truth is consistent
+                valid_comparison_count += 1
+                if pred == gt:
+                    correct_count += 1
+
+        if valid_comparison_count > 0:
+            accuracy = (correct_count / valid_comparison_count) * 100
+            print(f"\n--- Accuracy ---")
+            print(f"Compared {valid_comparison_count} sequences with consistent ground truth labels.")
+            print(f"Accuracy: {accuracy:.2f}% ({correct_count}/{valid_comparison_count})")
+        else:
+            print("\n--- Accuracy ---")
+            print("Accuracy could not be calculated: No sequences with consistent ground truth labels found for comparison.")
+    elif has_labels:
+        print("\n--- Accuracy ---")
+        print("Accuracy could not be calculated: No predictions or ground truth labels available.") 

@@ -3,7 +3,8 @@ import torch.nn as nn
 
 # --- Model Configuration ---
 # These should match the parameters used during training
-FEATURE_COLUMNS = ['LowAlpha', 'HighAlpha', 'LowBeta', 'HighBeta', 'LowGamma', 'HighGamma']
+# FEATURE_COLUMNS = ['Delta','Theta','LowAlpha','HighAlpha','LowBeta','HighBeta','LowGamma','HighGamma']
+FEATURE_COLUMNS = ['LowAlpha','HighAlpha','LowBeta','HighBeta','LowGamma','HighGamma']
 INPUT_SIZE = len(FEATURE_COLUMNS) # Number of features
 HIDDEN_SIZE = 32          # Number of features in the hidden state
 NUM_LAYERS = 1           # Number of stacked LSTM layers

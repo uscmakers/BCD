@@ -8,22 +8,27 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import os
 from sklearn.metrics import f1_score
+import joblib
+from collections import Counter # Import Counter for easy counting
 
 # --- Configuration ---
-CSV_FILE_PATH = 'eeg_samples/pela-binary-4_23.csv'
+CSV_FILE_PATH = 'eeg_samples/david-binary.csv'
 FEATURE_COLUMNS = ['alphaL','alphaH','betaL','betaH','gammaL','gammaM']
 LABEL_COLUMN = 'Label'
 # Define all possible labels your logger script produces
 POSSIBLE_LABELS = ['Forward', 'Backward', 'Left', 'Right', 'Up', 'Down', 'None']
 SEQUENCE_LENGTH = 4 # Number of time steps to look back
-TEST_SIZE = 0.2 # 20% of data for testing
+TEST_SIZE = 0.1 # 20% of data for testi
 RANDOM_STATE = 42 # For reproducible splits
 BATCH_SIZE = 32
-EPOCHS = 100
+EPOCHS = 60
 LEARNING_RATE = 0.001
-HIDDEN_SIZE = 32
+HIDDEN_SIZE = 64
 NUM_LAYERS = 1
-MODEL_SAVE_PATH = 'pela6DOF_lstm_model.pth' # New model name
+DROPOUT_RATE = 0.3
+WEIGHT_DECAY = 1e-4
+MODEL_SAVE_PATH = 'eeg_lstm_model_consistent_label_reg.pth' # Updated name
+SCALER_SAVE_PATH = 'eeg_scaler_consistent_label_reg.joblib' # Updated name
 
 # --- Set Device ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,48 +69,75 @@ y_labels = df_filtered[LABEL_COLUMN].values
 
 # Encode Labels
 label_encoder = LabelEncoder()
-# Fit the encoder on all possible labels to ensure consistent encoding
 label_encoder.fit(POSSIBLE_LABELS)
-y_encoded = label_encoder.transform(y_labels) # Transform the actual labels found in the data
+y_encoded = label_encoder.transform(y_labels)
 num_classes = len(label_encoder.classes_)
 print(f"\nLabels mapped ({num_classes} classes):")
+none_encoded_value = -1
 for i, cls in enumerate(label_encoder.classes_):
     print(f"  '{cls}' -> {i}")
+    if cls == 'None':
+        none_encoded_value = i
+if none_encoded_value == -1:
+    print("Error: 'None' label not found in POSSIBLE_LABELS after encoding!")
+    exit()
+print(f"Encoded value for 'None': {none_encoded_value}")
 
 # Scale Features
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X_raw)
 print(f"\nFeatures scaled.")
 
-# --- 3. Create Sequences ---
-print(f"\nCreating sequences of length {SEQUENCE_LENGTH}...")
+# --- Save the Scaler ---
+print(f"Saving scaler to {SCALER_SAVE_PATH}...")
+try:
+    joblib.dump(scaler, SCALER_SAVE_PATH)
+    print("Scaler saved successfully.")
+except Exception as e:
+    print(f"Error saving scaler: {e}")
+# --- End Save Scaler ---
+
+# --- 3. Create Sequences (Modified Labeling Logic) ---
+print(f"\nCreating sequences of length {SEQUENCE_LENGTH} with consistent labeling...")
 X_sequences = []
-y_sequences = []
-
-# Iterate through the data to create overlapping sequences
-# Start from SEQUENCE_LENGTH - 1 to have enough past data for the first sequence
+y_sequences = [] # Will store the determined label for each sequence
 for i in range(SEQUENCE_LENGTH - 1, len(X_scaled)):
-    # Sequence: from index i-SEQUENCE_LENGTH+1 up to i (inclusive)
-    X_sequences.append(X_scaled[i - SEQUENCE_LENGTH + 1 : i + 1])
-    # Label corresponds to the end of the sequence (index i)
-    y_sequences.append(y_encoded[i])
-
-# Convert lists to numpy arrays
+    feature_sequence = X_scaled[i - SEQUENCE_LENGTH + 1 : i + 1]
+    X_sequences.append(feature_sequence)
+    label_window = y_encoded[i - SEQUENCE_LENGTH + 1 : i + 1]
+    first_label_in_window = label_window[0]
+    is_consistent = all(label == first_label_in_window for label in label_window)
+    if is_consistent:
+        sequence_label = first_label_in_window
+    else:
+        sequence_label = none_encoded_value
+    y_sequences.append(sequence_label)
 X_sequences = np.array(X_sequences)
 y_sequences = np.array(y_sequences)
-
 print(f"Created {len(X_sequences)} sequences.")
-print(f"Shape of X_sequences: {X_sequences.shape}") # Should be (num_samples, sequence_length, num_features)
-print(f"Shape of y_sequences: {y_sequences.shape}") # Should be (num_samples,)
+# CRITICAL CHECK: Examine the output of this print statement carefully!
+unique_seq_labels, counts_seq_labels = np.unique(y_sequences, return_counts=True)
+print("\nOverall Sequence Label distribution (before split):")
+for label_idx, count in zip(unique_seq_labels, counts_seq_labels):
+    label_name = label_encoder.inverse_transform([label_idx])[0]
+    print(f"  Label '{label_name}' ({label_idx}): {count}")
+# --- End Create Sequences ---
 
 # --- 4. Split Data ---
-# Split the sequences and their corresponding labels
 X_train_seq, X_test_seq, y_train_seq, y_test_seq = train_test_split(
     X_sequences, y_sequences, test_size=TEST_SIZE, random_state=RANDOM_STATE, stratify=y_sequences
 )
 print(f"\nData split into training and testing sets:")
 print(f"X_train_seq shape: {X_train_seq.shape}, y_train_seq shape: {y_train_seq.shape}")
 print(f"X_test_seq shape: {X_test_seq.shape}, y_test_seq shape: {y_test_seq.shape}")
+
+# --- Add Print Statement for Training Data Distribution ---
+print("\nTraining Set Label distribution:")
+train_label_counts = Counter(y_train_seq)
+for label_idx, count in sorted(train_label_counts.items()): # Sort by index for consistency
+    label_name = label_encoder.inverse_transform([label_idx])[0]
+    print(f"  Label '{label_name}' ({label_idx}): {count} ({count/len(y_train_seq)*100:.2f}%)")
+# --- End Print Statement ---
 
 # --- 5. Create PyTorch Datasets and DataLoaders ---
 
@@ -129,58 +161,49 @@ test_loader = DataLoader(dataset=test_dataset, batch_size=BATCH_SIZE, shuffle=Fa
 
 print(f"\nCreated DataLoaders with batch size {BATCH_SIZE}.")
 
-# --- 6. Build the RNN (LSTM) Model ---
-print("\nBuilding the PyTorch RNN (LSTM) model...")
+# --- 6. Build the LSTM Model ---
+print("\nBuilding the PyTorch LSTM model with Dropout...")
 
 class EEGLSTMClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, num_classes):
+    def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout_rate):
         super(EEGLSTMClassifier, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        # LSTM layer: batch_first=True means input/output tensors are (batch, seq, feature)
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        # Fully connected layer to map LSTM output to class scores
+        lstm_dropout = dropout_rate if num_layers > 1 else 0
+        # Use nn.LSTM
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
+                            batch_first=True, dropout=lstm_dropout)
+        self.dropout = nn.Dropout(dropout_rate)
         self.fc = nn.Linear(hidden_size, num_classes)
 
     def forward(self, x):
-        # Initialize hidden state and cell state with zeros
-        # Shape: (num_layers, batch_size, hidden_size)
+        # Initialize hidden state and cell state for LSTM
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
 
         # Forward propagate LSTM
-        # out: contains output features (h_t) from the last layer of the LSTM for each t
-        #      Shape: (batch_size, seq_length, hidden_size)
-        # hn: final hidden state for each element in the batch
-        #      Shape: (num_layers, batch_size, hidden_size)
-        # cn: final cell state for each element in the batch
-        #      Shape: (num_layers, batch_size, hidden_size)
-        out, (hn, cn) = self.lstm(x, (h0, c0))
+        lstm_out, _ = self.lstm(x, (h0, c0)) # Use tuple (h0, c0)
 
-        # We only need the output of the last time step
-        # Option 1: Use the final hidden state (hn) of the last layer
-        # out = hn[-1, :, :] # Get the last layer's hidden state
-        # Option 2: Use the output sequence's last element
-        out = out[:, -1, :] # Get output of the last time step, shape (batch_size, hidden_size)
+        last_step_out = lstm_out[:, -1, :]
+        dropped_out = self.dropout(last_step_out)
+        out = self.fc(dropped_out)
+        return out
 
-        # Pass the output of the last time step through the fully connected layer
-        out = self.fc(out) # Shape: (batch_size, num_classes)
-        return out # Raw logits output
-
-input_dim = X_train_seq.shape[2] # Number of features
+input_dim = X_train_seq.shape[2]
+# Instantiate the LSTM model class
 model = EEGLSTMClassifier(input_size=input_dim,
                           hidden_size=HIDDEN_SIZE,
                           num_layers=NUM_LAYERS,
-                          num_classes=num_classes).to(device)
+                          num_classes=num_classes,
+                          dropout_rate=DROPOUT_RATE).to(device)
 print(model)
-print(f"Model configured for {num_classes} output classes.")
+print(f"Model configured for {num_classes} output classes with dropout {DROPOUT_RATE}.")
 
 # --- 7. Define Loss Function and Optimizer ---
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-
+optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 print(f"\nLoss function: {criterion}")
-print(f"Optimizer: {optimizer}")
+print(f"Optimizer: {optimizer} (with weight decay {WEIGHT_DECAY})")
 
 # --- 8. Training Loop ---
 print("\nTraining the model...")
